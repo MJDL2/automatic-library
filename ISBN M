@@ -1,0 +1,142 @@
+import os
+import requests
+import json
+import logging
+from dotenv import load_dotenv
+import isbnlib
+
+# 환경 변수 로드
+load_dotenv()
+
+class ISBNMetadataCollector:
+    def __init__(self):
+        # API 키 설정
+        self.google_books_api_key = os.getenv('GOOGLE_BOOKS_API_KEY')
+        self.open_library_url = 'https://openlibrary.org/api/books'
+        self.isbn_db_api_key = os.getenv('ISBN_DB_API_KEY')
+        
+        # 로깅 설정
+        logging.basicConfig(
+            level=logging.INFO, 
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            filename='isbn_metadata.log'
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def validate_isbn(self, isbn):
+        """ISBN 유효성 검사"""
+        try:
+            return isbnlib.is_isbn10(isbn) or isbnlib.is_isbn13(isbn)
+        except Exception as e:
+            self.logger.error(f"ISBN 유효성 검사 중 오류 발생: {e}")
+            return False
+
+    def fetch_google_books_metadata(self, isbn):
+        """Google Books API에서 메타데이터 수집"""
+        try:
+            url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}&key={self.google_books_api_key}"
+            response = requests.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('totalItems') > 0:
+                    book_info = data['items'][0]['volumeInfo']
+                    return {
+                        'title': book_info.get('title', ''),
+                        'authors': book_info.get('authors', []),
+                        'publisher': book_info.get('publisher', ''),
+                        'publishedDate': book_info.get('publishedDate', ''),
+                        'description': book_info.get('description', '')
+                    }
+            return None
+        except Exception as e:
+            self.logger.warning(f"Google Books API 메타데이터 수집 실패: {e}")
+            return None
+
+    def fetch_open_library_metadata(self, isbn):
+        """Open Library API에서 메타데이터 수집"""
+        try:
+            params = {
+                'bibkeys': f'ISBN:{isbn}',
+                'format': 'json',
+                'jscmd': 'data'
+            }
+            response = requests.get(self.open_library_url, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    book_data = data.get(f'ISBN:{isbn}', {})
+                    return {
+                        'title': book_data.get('title', ''),
+                        'authors': [author.get('name', '') for author in book_data.get('authors', [])],
+                        'publishers': [pub.get('name', '') for pub in book_data.get('publishers', [])],
+                        'publish_date': book_data.get('publish_date', '')
+                    }
+            return None
+        except Exception as e:
+            self.logger.warning(f"Open Library API 메타데이터 수집 실패: {e}")
+            return None
+
+    def collect_metadata(self, isbn):
+        """
+        다중 소스에서 ISBN 메타데이터 수집 및 통합
+        """
+        # ISBN 유효성 검사
+        if not self.validate_isbn(isbn):
+            self.logger.error(f"유효하지 않은 ISBN: {isbn}")
+            return None
+
+        # 메타데이터 수집
+        sources = [
+            self.fetch_google_books_metadata(isbn),
+            self.fetch_open_library_metadata(isbn)
+        ]
+
+        # 유효한 메타데이터 병합
+        merged_metadata = {}
+        for source in sources:
+            if source:
+                for key, value in source.items():
+                    if value and not merged_metadata.get(key):
+                        merged_metadata[key] = value
+
+        # 메타데이터 누락 확인 및 로깅
+        if not merged_metadata:
+            self.logger.warning(f"ISBN {isbn}에 대한 메타데이터를 찾을 수 없습니다.")
+            return None
+
+        # 구조화된 메타데이터 반환
+        metadata = {
+            'isbn': isbn,
+            'metadata': merged_metadata
+        }
+
+        return metadata
+
+    def save_metadata(self, metadata, output_dir='metadata'):
+        """
+        메타데이터를 JSON 파일로 저장
+        """
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            file_path = os.path.join(output_dir, f"{metadata['isbn']}_metadata.json")
+            
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=4)
+            
+            self.logger.info(f"메타데이터 저장 완료: {file_path}")
+            return file_path
+        except Exception as e:
+            self.logger.error(f"메타데이터 저장 중 오류 발생: {e}")
+            return None
+
+# 사용 예시
+def main():
+    collector = ISBNMetadataCollector()
+    isbn = '9788996991342'  # 예시 ISBN
+    
+    metadata = collector.collect_metadata(isbn)
+    if metadata:
+        collector.save_metadata(metadata)
+
+if __name__ == '__main__':
+    main()
